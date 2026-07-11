@@ -1904,6 +1904,14 @@ _PROVIDER_KEY_LINKS = {
 
 def _render_llm_config(st) -> dict | None:
     """Render LLM provider config UI; returns config dict or None for rule-based."""
+    if _is_hosted_demo(st):
+        st.caption(
+            "🔒 LLM-enhanced mode is disabled on this public demo (no API keys "
+            "configured). Recommendations use the rule-based engine. Run "
+            "`aquascope dashboard` locally with your own key to enable it."
+        )
+        return None
+
     from aquascope.ai_engine.recommender import PROVIDER_BASE_URLS, PROVIDER_MODELS
 
     with st.expander("⚙️ LLM Enhancement (optional)", expanded=False):
