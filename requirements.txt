@@ -1,0 +1,5 @@
+# Streamlit Community Cloud installs this file to build the app.
+# It installs AquaScope itself (this repo) plus the extras the dashboard
+# needs: `dashboard` for Streamlit + the folium map widget, `viz` for
+# matplotlib/seaborn/folium used by the plotting pages.
+.[dashboard,viz]
