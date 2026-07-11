@@ -318,6 +318,30 @@ def _camels_basin_picker(st, key: str) -> bool:
     return True
 
 
+def _auto_seed_if_hosted(st, loader, source_label: str) -> None:
+    """In hosted-demo mode, auto-seed `collected_data` and rerun so a
+    first-time visitor never sees an empty page. No-op for a normal local
+    ``aquascope dashboard`` run, which keeps today's button-driven empty state.
+    """
+    if not _is_hosted_demo(st):
+        return
+    st.session_state["collected_data"] = loader()
+    st.session_state["collected_source"] = source_label
+    st.rerun()
+
+
+def _default_streamflow_loader() -> pd.DataFrame:
+    """Default dataset for the streamflow-based pages (Hydrology, Extreme
+    Events, Signatures): the first bundled CAMELS catchment, falling back
+    to the generic water-quality demo set (which also has a `discharge`
+    column) if the bundled data isn't present.
+    """
+    catchments = _camels_catchments()
+    if catchments:
+        return _load_camels_streamflow(catchments[0]["gauge_id"])
+    return _load_demo_data()
+
+
 def _series_with_datetime(df, col: str):
     """Extract ``df[col]`` as a Series, attaching a DatetimeIndex if a date column exists.
 
@@ -834,6 +858,7 @@ def page_analysis() -> None:
     if data_source == "Use collected data (session)":
         df = st.session_state.get("collected_data")
         if df is None:
+            _auto_seed_if_hosted(st, _load_demo_data, "demo")
             # P1: Demo data CTA in empty state
             st.info("No data in session. Collect data first, upload a file, or load the demo dataset.")
             col1, col2 = st.columns([3, 1])
@@ -970,6 +995,7 @@ def page_visualization() -> None:
 
     df = st.session_state.get("collected_data")
     if df is None:
+        _auto_seed_if_hosted(st, _load_demo_data, "demo")
         # P1: Demo data CTA in empty state
         st.info("No data in session. Collect or upload data first, or load the demo dataset below.")
         col1, col2 = st.columns([3, 1])
@@ -1243,6 +1269,7 @@ def page_hydrology() -> None:
 
     df = st.session_state.get("collected_data")
     if df is None:
+        _auto_seed_if_hosted(st, _default_streamflow_loader, "camels_default")
         st.info("No data in session. Collect discharge data first, or load a sample catchment below.")
         if _camels_basin_picker(st, key="hydro"):
             st.caption("Bundled sample data from `data/camels_benchmark/` — 10 real-named catchments, no network or API key needed.")
@@ -1943,6 +1970,7 @@ def page_ai_recommender() -> None:
     with tab_auto:
         df = st.session_state.get("collected_data")
         if df is None:
+            _auto_seed_if_hosted(st, _load_demo_data, "demo")
             st.info("No data in session. Load demo data or collect data first, then return here for auto-recommendations.")
             if st.button("Load demo dataset", key="demo_ai", use_container_width=False):
                 st.session_state["collected_data"] = _load_demo_data()
@@ -2050,6 +2078,7 @@ def page_water_quality_alerts() -> None:
 
     df = st.session_state.get("collected_data")
     if df is None:
+        _auto_seed_if_hosted(st, _load_demo_data, "demo")
         # P1: Demo data CTA in empty state
         st.info("No data in session. Collect water quality data first or load the demo dataset.")
         col1, col2 = st.columns([3, 1])
