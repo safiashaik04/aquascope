@@ -529,13 +529,25 @@ def page_data_collection() -> None:
     st.title("📊 Data Collection")
     st.markdown("Fetch water data from any of AquaScope's supported sources.")
 
+    hosted = _is_hosted_demo(st)
+    visible_sources = [
+        (k, v) for k, v in _DATA_SOURCES
+        if not (hosted and k in _API_KEY_SOURCES)
+    ]
+    if hosted and len(visible_sources) < len(_DATA_SOURCES):
+        st.caption(
+            "🔒 Sources that require a free API key (Taiwan MOENV, Copernicus CDS) "
+            "are hidden on this public demo — no keys are configured here. Run "
+            "`aquascope dashboard` locally with your own key to use them."
+        )
+
     def _label(key: str) -> str:
         base = dict(_DATA_SOURCES)[key]
         return f"🔑 {base}" if key in _API_KEY_SOURCES else base
 
     source_key = st.selectbox(
         "Data Source",
-        options=[k for k, _ in _DATA_SOURCES],
+        options=[k for k, _ in visible_sources],
         format_func=_label,
     )
 
