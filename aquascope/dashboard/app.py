@@ -226,6 +226,98 @@ def _load_demo_weather(days: int = 150, start: str = "2023-03-01", seed: int = 1
     return weather, precip_series
 
 
+def _is_hosted_demo(st) -> bool:
+    """True when running as the public hosted demo, not a local ``aquascope dashboard`` run.
+
+    "Hosted demo" mode means: we're running on Streamlit Community Cloud with no
+    secrets configured, or the caller explicitly opted in via a ``?demo=1`` query
+    parameter. In this mode the app auto-seeds sample data instead of showing an
+    empty state, and hides collectors/LLM options that need secrets we don't have.
+
+    A plain local ``aquascope dashboard`` run has no secrets configured either,
+    so "no secrets" alone isn't enough to detect hosting -- it would also match
+    every local run. We additionally check for the distinctive path Community
+    Cloud checks the repo out to (``/mount/src/...``), so local runs keep
+    today's empty-state + button behavior unchanged.
+    """
+    from pathlib import Path
+
+    try:
+        demo_param = st.query_params.get("demo") == "1"
+    except Exception:  # noqa: BLE001 - query_params API varies across versions
+        demo_param = False
+
+    on_streamlit_cloud = Path("/mount/src").exists()
+
+    try:
+        has_secrets = len(st.secrets) > 0
+    except Exception:  # noqa: BLE001 - st.secrets raises if no secrets.toml exists
+        has_secrets = False
+
+    return demo_param or (on_streamlit_cloud and not has_secrets)
+
+
+def _camels_catchments() -> list[dict]:
+    """Load metadata for the bundled CAMELS benchmark sample catchments.
+
+    Returns an empty list if the sample data isn't present (e.g. a package
+    installed from PyPI without the repo's data/ directory) so callers can
+    fall back to the synthetic generator instead of crashing.
+    """
+    import json
+    from pathlib import Path
+
+    data_dir = Path(__file__).resolve().parents[2] / "data" / "camels_benchmark"
+    catchments_path = data_dir / "catchments.json"
+    if not catchments_path.exists():
+        return []
+    try:
+        catchments: list[dict] = json.loads(catchments_path.read_text())
+        return catchments
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read bundled CAMELS catchments.json", exc_info=True)
+        return []
+
+
+def _load_camels_streamflow(gauge_id: str) -> pd.DataFrame:
+    """Load bundled daily discharge + precipitation for one CAMELS benchmark catchment.
+
+    Ships with the repo (``data/camels_benchmark/``) -- no network or API keys
+    needed. Synthetic-but-realistic data generated to approximate published
+    CAMELS catchment statistics (see ``data/camels_benchmark/README.md``);
+    good for demos, not for scientific analysis.
+    """
+    from pathlib import Path
+
+    import pandas as pd
+
+    data_dir = Path(__file__).resolve().parents[2] / "data" / "camels_benchmark"
+    df = pd.read_csv(data_dir / f"{gauge_id}.csv", parse_dates=["date"])
+    return df.rename(columns={"discharge_cms": "discharge", "precipitation_mm": "precipitation"})
+
+
+def _camels_basin_picker(st, key: str) -> bool:
+    """Render a bundled-CAMELS catchment picker + load button.
+
+    On click, loads the selected catchment into ``st.session_state['collected_data']``
+    and reruns. Returns True (and renders the picker) if bundled CAMELS data is
+    available; returns False and renders nothing otherwise, so callers can fall
+    back to the synthetic generator.
+    """
+    catchments = _camels_catchments()
+    if not catchments:
+        return False
+
+    labels = {f"{c['name']} ({c['gauge_id']})": c["gauge_id"] for c in catchments}
+    label = st.selectbox("Sample catchment", list(labels.keys()), key=f"{key}_catchment")
+    if st.button("Load sample catchment", use_container_width=True, key=f"{key}_load"):
+        gauge_id = labels[label]
+        st.session_state["collected_data"] = _load_camels_streamflow(gauge_id)
+        st.session_state["collected_source"] = f"camels_{gauge_id}"
+        st.rerun()
+    return True
+
+
 def _series_with_datetime(df, col: str):
     """Extract ``df[col]`` as a Series, attaching a DatetimeIndex if a date column exists.
 
@@ -1151,16 +1243,18 @@ def page_hydrology() -> None:
 
     df = st.session_state.get("collected_data")
     if df is None:
-        # P1: Demo data CTA in empty state
-        st.info("No data in session. Collect discharge data first or load the demo dataset.")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.caption("The demo dataset includes a `discharge` column with seasonal flow patterns — ready for FDC, baseflow separation, and flood frequency analysis.")
-        with col2:
-            if st.button("Load demo dataset", use_container_width=True, key="demo_hydro"):
-                st.session_state["collected_data"] = _load_demo_data()
-                st.session_state["collected_source"] = "demo"
-                st.rerun()
+        st.info("No data in session. Collect discharge data first, or load a sample catchment below.")
+        if _camels_basin_picker(st, key="hydro"):
+            st.caption("Bundled sample data from `data/camels_benchmark/` — 10 real-named catchments, no network or API key needed.")
+        else:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.caption("The demo dataset includes a `discharge` column with seasonal flow patterns — ready for FDC, baseflow separation, and flood frequency analysis.")
+            with col2:
+                if st.button("Load demo dataset", use_container_width=True, key="demo_hydro"):
+                    st.session_state["collected_data"] = _load_demo_data()
+                    st.session_state["collected_source"] = "demo"
+                    st.rerun()
         return
 
     analysis = st.selectbox(
@@ -1365,27 +1459,29 @@ def _hydro_signatures(st, df: pd.DataFrame) -> None:
     if not isinstance(q.index, pd.DatetimeIndex):
         st.warning(
             "Flow signatures need a daily series with a date column "
-            "(`sample_datetime`/`date`). Load the demo dataset for a ready-made "
-            "40-year streamflow record."
+            "(`sample_datetime`/`date`). Load a sample catchment below for a "
+            "ready-made daily streamflow record."
         )
-        if st.button("Load 40-year demo streamflow", key="sig_demo"):
-            demo = _load_demo_streamflow()
-            st.session_state["collected_data"] = demo.reset_index().rename(
-                columns={"index": "sample_datetime", "discharge": "discharge"}
-            )
-            st.session_state["collected_source"] = "demo_streamflow"
-            st.rerun()
+        if not _camels_basin_picker(st, key="sig_demo"):
+            if st.button("Load 40-year demo streamflow", key="sig_demo_fallback"):
+                demo = _load_demo_streamflow()
+                st.session_state["collected_data"] = demo.reset_index().rename(
+                    columns={"index": "sample_datetime", "discharge": "discharge"}
+                )
+                st.session_state["collected_source"] = "demo_streamflow"
+                st.rerun()
         return
 
     if len(q) < 365:
-        st.warning(f"Need at least 365 daily values — got {len(q)}. Try the 40-year demo streamflow.")
-        if st.button("Load 40-year demo streamflow", key="sig_demo2"):
-            demo = _load_demo_streamflow()
-            st.session_state["collected_data"] = demo.reset_index().rename(
-                columns={"index": "sample_datetime", "discharge": "discharge"}
-            )
-            st.session_state["collected_source"] = "demo_streamflow"
-            st.rerun()
+        st.warning(f"Need at least 365 daily values — got {len(q)}. Try a sample catchment below.")
+        if not _camels_basin_picker(st, key="sig_demo2"):
+            if st.button("Load 40-year demo streamflow", key="sig_demo2_fallback"):
+                demo = _load_demo_streamflow()
+                st.session_state["collected_data"] = demo.reset_index().rename(
+                    columns={"index": "sample_datetime", "discharge": "discharge"}
+                )
+                st.session_state["collected_source"] = "demo_streamflow"
+                st.rerun()
         return
 
     with st.spinner("Computing hydrological signatures…"):
@@ -1448,20 +1544,28 @@ def page_extreme_events() -> None:
 
     import pandas as pd
 
-    src = st.radio(
-        "Data source",
-        ["Demo streamflow (40 yrs)", "Use session data"],
-        horizontal=True,
-    )
+    camels = _camels_catchments()
+    source_options = []
+    if camels:
+        source_options.append("Sample catchment (bundled)")
+    source_options += ["Demo streamflow (40 yrs, synthetic)", "Use session data"]
+
+    src = st.radio("Data source", source_options, horizontal=True)
 
     series = None
-    if src == "Demo streamflow (40 yrs)":
+    if src == "Sample catchment (bundled)":
+        labels = {f"{c['name']} ({c['gauge_id']})": c["gauge_id"] for c in camels}
+        label = st.selectbox("Catchment", list(labels.keys()), key="extreme_catchment")
+        cdf = _load_camels_streamflow(labels[label])
+        series = cdf.set_index("date")["discharge"]
+        st.caption(f"Loaded bundled sample data for {label}: {len(series)} days, {series.index.year.nunique()} years.")
+    elif src == "Demo streamflow (40 yrs, synthetic)":
         series = _load_demo_streamflow()
         st.caption(f"Loaded synthetic daily discharge: {len(series)} days, {series.index.year.nunique()} years.")
     else:
         df = st.session_state.get("collected_data")
         if df is None:
-            st.info("No data in session. Collect data first, or switch to the demo streamflow above.")
+            st.info("No data in session. Collect data first, or switch to a sample source above.")
             return
         num_cols = list(df.select_dtypes(include="number").columns)
         if not num_cols:
